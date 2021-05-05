@@ -35,6 +35,11 @@ from data_generator import DataGenerator
 from maml import MAML
 from tensorflow.python.platform import flags
 
+from utils import load_model, interpret_steps, plot_neighbour_analysis, plot_base_analysis, plot_performance
+
+# os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+# os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 FLAGS = flags.FLAGS
 
 ## Dataset/method options
@@ -69,7 +74,13 @@ flags.DEFINE_bool('test_set', False, 'Set to true to test on the the test set, F
 flags.DEFINE_integer('train_update_batch_size', -1, 'number of examples used for gradient update during training (use if you want to test with a different number).')
 flags.DEFINE_float('train_update_lr', -1, 'value of inner gradient step step during training. (use if you want to test with a different value)') # 0.1 for omniglot
 
-def train(model, saver, sess, exp_string, data_generator, resume_itr=0):
+## Analysis parameters
+flags.DEFINE_bool('analyze', False, 'True to analyze, False to not analyze.')
+flags.DEFINE_integer('points_to_analyze', 4, 'number of points to analyze Default: 4')
+flags.DEFINE_bool('base_analysis', False, 'In case you specifically want to analyze the meta-optimization')
+flags.DEFINE_string('steps_to_analyze', "range(0,1,1)", 'Steps to analyze. Can be a list, a range, or a number')
+
+def train(model, saver, sess, exp_string, data_generator, resume_itr=1):
     SUMMARY_INTERVAL = 100
     SAVE_INTERVAL = 1000
     if FLAGS.datasource == 'sinusoid':
@@ -87,7 +98,7 @@ def train(model, saver, sess, exp_string, data_generator, resume_itr=0):
     num_classes = data_generator.num_classes # for classification, 1 otherwise
     multitask_weights, reg_weights = [], []
 
-    for itr in range(resume_itr, FLAGS.pretrain_iterations + FLAGS.metatrain_iterations):
+    for itr in range(resume_itr, FLAGS.pretrain_iterations + FLAGS.metatrain_iterations + 1): # as resume_itr starts at 1, we have to +1
         feed_dict = {}
         if 'generate' in dir(data_generator):
             batch_x, batch_y, amp, phase = data_generator.generate()
@@ -132,7 +143,7 @@ def train(model, saver, sess, exp_string, data_generator, resume_itr=0):
             prelosses, postlosses = [], []
 
         if (itr!=0) and itr % SAVE_INTERVAL == 0:
-            saver.save(sess, FLAGS.logdir + '/' + exp_string + '/model' + str(itr))
+            saver.save(sess, FLAGS.logdir + '/' + exp_string + '/model' + str(itr), write_meta_graph=False)
 
         # sinusoid is infinite data, so no need to test on meta-validation set.
         if (itr!=0) and itr % TEST_PRINT_INTERVAL == 0 and FLAGS.datasource !='sinusoid':
@@ -168,51 +179,176 @@ def test(model, saver, sess, exp_string, data_generator, test_num_updates=None):
     np.random.seed(1)
     random.seed(1)
 
-    metaval_accuracies = []
 
-    for _ in range(NUM_TEST_POINTS):
-        if 'generate' not in dir(data_generator):
-            feed_dict = {}
-            feed_dict = {model.meta_lr : 0.0}
-        else:
-            batch_x, batch_y, amp, phase = data_generator.generate(train=False)
+    steps = range(1000,61000,1000)
+    accs = []
 
-            if FLAGS.baseline == 'oracle': # NOTE - this flag is specific to sinusoid
-                batch_x = np.concatenate([batch_x, np.zeros([batch_x.shape[0], batch_x.shape[1], 2])], 2)
-                batch_x[0, :, 1] = amp[0]
-                batch_x[0, :, 2] = phase[0]
+    inner_loops = 5
+    for step in steps:
+        print(f"Load model {step}")
+        load_model(FLAGS.logdir, exp_string, saver, sess, step)
 
-            inputa = batch_x[:, :num_classes*FLAGS.update_batch_size, :]
-            inputb = batch_x[:,num_classes*FLAGS.update_batch_size:, :]
-            labela = batch_y[:, :num_classes*FLAGS.update_batch_size, :]
-            labelb = batch_y[:,num_classes*FLAGS.update_batch_size:, :]
+        metaval_accuracies = []
 
-            feed_dict = {model.inputa: inputa, model.inputb: inputb,  model.labela: labela, model.labelb: labelb, model.meta_lr: 0.0}
+        for _ in range(NUM_TEST_POINTS):
+            if 'generate' not in dir(data_generator):
+                feed_dict = {}
+                feed_dict = {model.meta_lr : 0.0}
+            else:
+                batch_x, batch_y, amp, phase = data_generator.generate(train=False)
 
-        if model.classification:
-            result = sess.run([model.metaval_total_accuracy1] + model.metaval_total_accuracies2, feed_dict)
-        else:  # this is for sinusoid
-            result = sess.run([model.total_loss1] +  model.total_losses2, feed_dict)
-        metaval_accuracies.append(result)
+                if FLAGS.baseline == 'oracle': # NOTE - this flag is specific to sinusoid
+                    batch_x = np.concatenate([batch_x, np.zeros([batch_x.shape[0], batch_x.shape[1], 2])], 2)
+                    batch_x[0, :, 1] = amp[0]
+                    batch_x[0, :, 2] = phase[0]
 
-    metaval_accuracies = np.array(metaval_accuracies)
-    means = np.mean(metaval_accuracies, 0)
-    stds = np.std(metaval_accuracies, 0)
-    ci95 = 1.96*stds/np.sqrt(NUM_TEST_POINTS)
+                inputa = batch_x[:, :num_classes*FLAGS.update_batch_size, :]
+                inputb = batch_x[:,num_classes*FLAGS.update_batch_size:, :]
+                labela = batch_y[:, :num_classes*FLAGS.update_batch_size, :]
+                labelb = batch_y[:,num_classes*FLAGS.update_batch_size:, :]
 
-    print('Mean validation accuracy/loss, stddev, and confidence intervals')
-    print((means, stds, ci95))
+                feed_dict = {model.inputa: inputa, model.inputb: inputb,  model.labela: labela, model.labelb: labelb, model.meta_lr: 0.0}
 
-    out_filename = FLAGS.logdir +'/'+ exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '.csv'
-    out_pkl = FLAGS.logdir +'/'+ exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '.pkl'
-    with open(out_pkl, 'wb') as f:
-        pickle.dump({'mses': metaval_accuracies}, f)
-    with open(out_filename, 'w') as f:
-        writer = csv.writer(f, delimiter=',')
-        writer.writerow(['update'+str(i) for i in range(len(means))])
-        writer.writerow(means)
-        writer.writerow(stds)
-        writer.writerow(ci95)
+            if model.classification:
+                result = sess.run([model.metaval_total_accuracy1] + model.metaval_total_accuracies2, feed_dict)
+            else:  # this is for sinusoid
+                result = sess.run([model.total_loss1] +  model.total_losses2, feed_dict)
+            metaval_accuracies.append(result[inner_loops])
+
+        accs.append(np.array(metaval_accuracies))
+
+    plot_performance(steps, accs, NUM_TEST_POINTS)
+
+
+    # means = np.mean(metaval_accuracies, 0)
+    # stds = np.std(metaval_accuracies, 0)
+    # ci95 = 1.96*stds/np.sqrt(NUM_TEST_POINTS)
+    #
+    # print('Mean validation accuracy/loss, stddev, and confidence intervals')
+    # print((means, stds, ci95))
+    #
+    # out_filename = FLAGS.logdir +'/'+ exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '.csv'
+    # out_pkl = FLAGS.logdir +'/'+ exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '.pkl'
+    # with open(out_pkl, 'wb') as f:
+    #     pickle.dump({'mses': metaval_accuracies}, f)
+    # with open(out_filename, 'w') as f:
+    #     writer = csv.writer(f, delimiter=',')
+    #     writer.writerow(['update'+str(i) for i in range(len(means))])
+    #     writer.writerow(means)
+    #     writer.writerow(stds)
+    #     writer.writerow(ci95)
+
+
+def analyze(model, saver, sess, exp_string, data_generator, test_num_updates=None, NUM_ANALYSIS_POINTS=1, base_analysis=False, steps = [-1]):
+
+    ### computing activations
+
+    num_classes = data_generator.num_classes # for classification, 1 otherwise
+    np.random.seed(1)
+    random.seed(1)
+
+    print(exp_string)
+    hid1, hid2, hid3, hid4, out, acc = [], [], [], [], [], []
+
+    for step in steps:
+        meta_hidden1s = []
+        meta_hidden2s = []
+        meta_hidden3s = []
+        meta_hidden4s = []
+        meta_outputs = []
+        metaval_accuracies = []
+        print(f"Load model {step}")
+        load_model(FLAGS.logdir, exp_string, saver, sess, step)
+        print(f"Load model {step} done!")
+        for i in range(NUM_ANALYSIS_POINTS+1):
+
+            if i==0: # The first sample is the evaluation sample
+                continue;
+
+            if 'generate' not in dir(data_generator):
+                feed_dict = {}
+                feed_dict = {model.meta_lr : 0.00}
+            else:
+                batch_x, batch_y, amp, phase = data_generator.generate(train=False)
+
+                if FLAGS.baseline == 'oracle': # NOTE - this flag is specific to sinusoid
+                    batch_x = np.concatenate([batch_x, np.zeros([batch_x.shape[0], batch_x.shape[1], 2])], 2)
+                    batch_x[0, :, 1] = amp[0]
+                    batch_x[0, :, 2] = phase[0]
+
+                inputa = batch_x[:, :num_classes*FLAGS.update_batch_size, :]
+                inputb = batch_x[:,num_classes*FLAGS.update_batch_size:, :]
+                labela = batch_y[:, :num_classes*FLAGS.update_batch_size, :]
+                labelb = batch_y[:,num_classes*FLAGS.update_batch_size:, :]
+
+                feed_dict = {model.inputa: inputa, model.inputb: inputb,  model.labela: labela, model.labelb: labelb, model.meta_lr: 0.0}
+
+            targets = [model.hiddens1, model.hiddens2, model.hiddens3, model.hiddens4, model.outputs, model.metaval_total_accuracy1 + model.metaval_total_accuracies2]
+
+            def reshape_elems_of_list(layers, shape = (model.dim_output, -1)):
+                reshaped_layers = []
+                for layer in layers:
+                    layer = np.reshape(layer, shape)
+                    reshaped_layers.append(layer)
+                return reshaped_layers
+
+            hidden1s, hidden2s, hidden3s, hidden4s, outputs, a = sess.run(targets, feed_dict)
+
+            meta_hidden1s.append(reshape_elems_of_list(hidden1s))
+            meta_hidden2s.append(reshape_elems_of_list(hidden2s))
+            meta_hidden3s.append(reshape_elems_of_list(hidden3s))
+            meta_hidden4s.append(reshape_elems_of_list(hidden4s))
+            meta_outputs.append(reshape_elems_of_list(outputs))
+            metaval_accuracies.append(a)
+
+        hid1.append(meta_hidden1s)
+        hid2.append(meta_hidden2s)
+        hid3.append(meta_hidden3s)
+        hid4.append(meta_hidden4s)
+        out.append(meta_outputs)
+        acc.append(metaval_accuracies)
+
+    ### prepare for visualizing
+    from rsa import plot_rsa_fancy, rsa
+    layers = [hid1, hid2, hid3, hid4, out]
+    layer_names = ["Pooling layer 1", "Pooling layer 2", "Pooling layer 3", "Pooling layer 4", "Logits/Head"]
+
+    final_base_representation = []
+    final_mean_diff_to_base = []
+    final_std_diff_to_base = []
+    for i, (layer_name) in enumerate(layer_names):
+
+        representations = []
+        base_representations = []
+        mean_diff_to_base = []
+        std_diff_to_base = []
+        labels = []
+        colors = []
+        inner_steps = [0, 1, 5, 10]
+
+        for j, step in enumerate(steps):
+            base_representations.append(layers[i][j][0][0])
+            diff_to_base = []
+            for k in range(NUM_ANALYSIS_POINTS):
+                representations = representations + list(map(layers[i][j][k].__getitem__, inner_steps))
+                diff_to_base.append(rsa(np.array([base_representations[-1], representations[-1]])))
+                colors = colors + [k + j*NUM_ANALYSIS_POINTS] * len(inner_steps)
+            mean_diff_to_base.append(np.mean(diff_to_base))
+            std_diff_to_base.append(np.std(diff_to_base))
+            labels = colors
+
+        final = np.array(representations)
+        final_base_representation.append(np.array(base_representations))
+        final_mean_diff_to_base.append(np.array(mean_diff_to_base))
+        final_std_diff_to_base.append(np.array(std_diff_to_base))
+
+        if not base_analysis:
+            plot_rsa_fancy(final, labels, colors, method="correlation", title=layer_name, n_tasks=NUM_ANALYSIS_POINTS, steps=steps)
+
+    if base_analysis:
+        plot_neighbour_analysis(steps, final_base_representation, layer_names)
+        plot_base_analysis(steps, final_mean_diff_to_base, final_std_diff_to_base, layer_names)
+
 
 def main():
     if FLAGS.datasource == 'sinusoid':
@@ -274,12 +410,13 @@ def main():
             input_tensors = {'inputa': inputa, 'inputb': inputb, 'labela': labela, 'labelb': labelb}
 
         random.seed(6)
-        image_tensor, label_tensor = data_generator.make_data_tensor(train=False)
-        inputa = tf.slice(image_tensor, [0,0,0], [-1,num_classes*FLAGS.update_batch_size, -1])
-        inputb = tf.slice(image_tensor, [0,num_classes*FLAGS.update_batch_size, 0], [-1,-1,-1])
-        labela = tf.slice(label_tensor, [0,0,0], [-1,num_classes*FLAGS.update_batch_size, -1])
-        labelb = tf.slice(label_tensor, [0,num_classes*FLAGS.update_batch_size, 0], [-1,-1,-1])
+        image_tensor, label_tensor = data_generator.make_data_tensor(train=False, shuffle = False, analysis=FLAGS.analyze, points_to_analyze = FLAGS.points_to_analyze)
+        inputa = tf.slice(image_tensor, [0, 0, 0], [-1, num_classes * FLAGS.update_batch_size, -1])
+        inputb = tf.slice(image_tensor, [0, num_classes * FLAGS.update_batch_size, 0], [-1, -1, -1])
+        labela = tf.slice(label_tensor, [0, 0, 0], [-1, num_classes * FLAGS.update_batch_size, -1])
+        labelb = tf.slice(label_tensor, [0, num_classes * FLAGS.update_batch_size, 0], [-1, -1, -1])
         metaval_input_tensors = {'inputa': inputa, 'inputb': inputb, 'labela': labela, 'labelb': labelb}
+
     else:
         tf_data_load = False
         input_tensors = None
@@ -291,12 +428,12 @@ def main():
         model.construct_model(input_tensors=metaval_input_tensors, prefix='metaval_')
     model.summ_op = tf.summary.merge_all()
 
-    saver = loader = tf.train.Saver(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES), max_to_keep=10)
+    saver = loader = tf.train.Saver(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES), max_to_keep= 100)
 
     sess = tf.InteractiveSession()
 
     if FLAGS.train == False:
-        # change to original meta batch size when loading model.
+        # change to original meta batch size after loading model.
         FLAGS.meta_batch_size = orig_meta_batch_size
 
     if FLAGS.train_update_batch_size == -1:
@@ -323,26 +460,21 @@ def main():
     else:
         print('Norm setting not recognized.')
 
-    resume_itr = 0
+    resume_itr = 1 # We start with 1
     model_file = None
 
     tf.global_variables_initializer().run()
     tf.train.start_queue_runners()
 
-    if FLAGS.resume or not FLAGS.train:
-        model_file = tf.train.latest_checkpoint(FLAGS.logdir + '/' + exp_string)
-        if FLAGS.test_iter > 0:
-            model_file = model_file[:model_file.index('model')] + 'model' + str(FLAGS.test_iter)
-        if model_file:
-            ind1 = model_file.index('model')
-            resume_itr = int(model_file[ind1+5:])
-            print("Restoring model weights from " + model_file)
-            saver.restore(sess, model_file)
+    load_model(FLAGS.logdir, exp_string, saver, sess, FLAGS.test_iter)
 
     if FLAGS.train:
         train(model, saver, sess, exp_string, data_generator, resume_itr)
     else:
-        test(model, saver, sess, exp_string, data_generator, test_num_updates)
+        if FLAGS.analyze:
+            analyze(model, saver, sess, exp_string, data_generator, test_num_updates, FLAGS.points_to_analyze, base_analysis=FLAGS.base_analysis, steps=interpret_steps(FLAGS.steps_to_analyze))
+        else:
+            test(model, saver, sess, exp_string, data_generator, test_num_updates)
 
 if __name__ == "__main__":
     main()

@@ -60,6 +60,7 @@ class MAML:
             self.labela = input_tensors['labela']
             self.labelb = input_tensors['labelb']
 
+
         with tf.variable_scope('model', reuse=None) as training_scope:
             if 'weights' in dir(self):
                 training_scope.reuse_variables()
@@ -80,34 +81,54 @@ class MAML:
                 """ Perform gradient descent for one task in the meta-batch. """
                 inputa, inputb, labela, labelb = inp
                 task_outputbs, task_lossesb = [], []
+                task_hiddens1, task_hiddens2, task_hiddens3, task_hiddens4 = [], [], [], []
 
                 if self.classification:
                     task_accuraciesb = []
 
-                task_outputa = self.forward(inputa, weights, reuse=reuse)  # only reuse on the first iter
+                task_outputa = self.forward(inputa, weights, reuse=reuse)[0]  # only reuse on the first iter
                 task_lossa = self.loss_func(task_outputa, labela)
+
+                # For analysis: we need activations of input b BEFORE inner gradient steps
+                forward = self.forward(inputb, weights, reuse=True)
+                output, hidden1, hidden2, hidden3, hidden4 = forward[0], forward[1], forward[2], forward[3], forward[4]
+                task_outputbs.append(output)
+                task_hiddens1.append(hidden1)
+                task_hiddens2.append(hidden2)
+                task_hiddens3.append(hidden3)
+                task_hiddens4.append(hidden4)
 
                 grads = tf.gradients(task_lossa, list(weights.values()))
                 if FLAGS.stop_grad:
                     grads = [tf.stop_gradient(grad) for grad in grads]
                 gradients = dict(zip(weights.keys(), grads))
                 fast_weights = dict(zip(weights.keys(), [weights[key] - self.update_lr*gradients[key] for key in weights.keys()]))
-                output = self.forward(inputb, fast_weights, reuse=True)
+                forward = self.forward(inputb, fast_weights, reuse=True)
+                output, hidden1, hidden2, hidden3, hidden4 = forward[0], forward[1], forward[2], forward[3], forward[4]
                 task_outputbs.append(output)
+                task_hiddens1.append(hidden1)
+                task_hiddens2.append(hidden2)
+                task_hiddens3.append(hidden3)
+                task_hiddens4.append(hidden4)
                 task_lossesb.append(self.loss_func(output, labelb))
 
                 for j in range(num_updates - 1):
-                    loss = self.loss_func(self.forward(inputa, fast_weights, reuse=True), labela)
+                    loss = self.loss_func(self.forward(inputa, fast_weights, reuse=True)[0], labela)
                     grads = tf.gradients(loss, list(fast_weights.values()))
                     if FLAGS.stop_grad:
                         grads = [tf.stop_gradient(grad) for grad in grads]
                     gradients = dict(zip(fast_weights.keys(), grads))
                     fast_weights = dict(zip(fast_weights.keys(), [fast_weights[key] - self.update_lr*gradients[key] for key in fast_weights.keys()]))
-                    output = self.forward(inputb, fast_weights, reuse=True)
+                    forward = self.forward(inputb, fast_weights, reuse=True)
+                    output, hidden1, hidden2, hidden3, hidden4 = forward[0], forward[1], forward[2], forward[3], forward[4]
                     task_outputbs.append(output)
+                    task_hiddens1.append(hidden1)
+                    task_hiddens2.append(hidden2)
+                    task_hiddens3.append(hidden3)
+                    task_hiddens4.append(hidden4)
                     task_lossesb.append(self.loss_func(output, labelb))
 
-                task_output = [task_outputa, task_outputbs, task_lossa, task_lossesb]
+                task_output = [task_outputa, task_outputbs, task_lossa, task_lossesb, task_hiddens1, task_hiddens2, task_hiddens3, task_hiddens4]
 
                 if self.classification:
                     task_accuracya = tf.contrib.metrics.accuracy(tf.argmax(tf.nn.softmax(task_outputa), 1), tf.argmax(labela, 1))
@@ -121,12 +142,12 @@ class MAML:
                 # to initialize the batch norm vars, might want to combine this, and not run idx 0 twice.
                 unused = task_metalearn((self.inputa[0], self.inputb[0], self.labela[0], self.labelb[0]), False)
 
-            out_dtype = [tf.float32, [tf.float32]*num_updates, tf.float32, [tf.float32]*num_updates]
+            out_dtype = [tf.float32, [tf.float32]*(num_updates+1), tf.float32, [tf.float32]*num_updates, [tf.float32]*(num_updates+1), [tf.float32]*(num_updates+1), [tf.float32]*(num_updates+1), [tf.float32]*(num_updates+1)]
             if self.classification:
                 out_dtype.extend([tf.float32, [tf.float32]*num_updates])
             result = tf.map_fn(task_metalearn, elems=(self.inputa, self.inputb, self.labela, self.labelb), dtype=out_dtype, parallel_iterations=FLAGS.meta_batch_size)
             if self.classification:
-                outputas, outputbs, lossesa, lossesb, accuraciesa, accuraciesb = result
+                outputas, outputbs, lossesa, lossesb, hiddens1, hiddens2, hiddens3, hiddens4, accuraciesa, accuraciesb = result
             else:
                 outputas, outputbs, lossesa, lossesb  = result
 
@@ -148,11 +169,17 @@ class MAML:
                     gvs = [(tf.clip_by_value(grad, -10, 10), var) for grad, var in gvs]
                 self.metatrain_op = optimizer.apply_gradients(gvs)
         else:
+            self.outputs = outputbs
+            self.hiddens1 = hiddens1
+            self.hiddens2 = hiddens2
+            self.hiddens3 = hiddens3
+            self.hiddens4 = hiddens4
             self.metaval_total_loss1 = total_loss1 = tf.reduce_sum(lossesa) / tf.to_float(FLAGS.meta_batch_size)
             self.metaval_total_losses2 = total_losses2 = [tf.reduce_sum(lossesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
             if self.classification:
                 self.metaval_total_accuracy1 = total_accuracy1 = tf.reduce_sum(accuraciesa) / tf.to_float(FLAGS.meta_batch_size)
                 self.metaval_total_accuracies2 = total_accuracies2 =[tf.reduce_sum(accuraciesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
+
 
         ## Summaries
         tf.summary.scalar(prefix+'Pre-update loss', total_loss1)
@@ -212,16 +239,15 @@ class MAML:
         channels = self.channels
         inp = tf.reshape(inp, [-1, self.img_size, self.img_size, channels])
 
-        hidden1 = conv_block(inp, weights['conv1'], weights['b1'], reuse, scope+'0')
-        hidden2 = conv_block(hidden1, weights['conv2'], weights['b2'], reuse, scope+'1')
-        hidden3 = conv_block(hidden2, weights['conv3'], weights['b3'], reuse, scope+'2')
-        hidden4 = conv_block(hidden3, weights['conv4'], weights['b4'], reuse, scope+'3')
+        hidden1 = conv_block(inp, weights['conv1'], weights['b1'], reuse, scope + '0')
+        hidden2 = conv_block(hidden1, weights['conv2'], weights['b2'], reuse, scope + '1')
+        hidden3 = conv_block(hidden2, weights['conv3'], weights['b3'], reuse, scope + '2')
+        hidden4 = conv_block(hidden3, weights['conv4'], weights['b4'], reuse, scope + '3')
         if FLAGS.datasource == 'miniimagenet':
             # last hidden layer is 6x6x64-ish, reshape to a vector
             hidden4 = tf.reshape(hidden4, [-1, np.prod([int(dim) for dim in hidden4.get_shape()[1:]])])
         else:
             hidden4 = tf.reduce_mean(hidden4, [1, 2])
-
-        return tf.matmul(hidden4, weights['w5']) + weights['b5']
+        return tf.matmul(hidden4, weights['w5']) + weights['b5'], hidden1, hidden2, hidden3, hidden4
 
 
