@@ -2,27 +2,19 @@
 Usage Instructions:
     10-shot sinusoid:
         python main.py --datasource=sinusoid --logdir=logs/sine/ --metatrain_iterations=70000 --norm=None --update_batch_size=10
-
     10-shot sinusoid baselines:
         python main.py --datasource=sinusoid --logdir=logs/sine/ --pretrain_iterations=70000 --metatrain_iterations=0 --norm=None --update_batch_size=10 --baseline=oracle
         python main.py --datasource=sinusoid --logdir=logs/sine/ --pretrain_iterations=70000 --metatrain_iterations=0 --norm=None --update_batch_size=10
-
     5-way, 1-shot omniglot:
         python main.py --datasource=omniglot --metatrain_iterations=60000 --meta_batch_size=32 --update_batch_size=1 --update_lr=0.4 --num_updates=1 --logdir=logs/omniglot5way/
-
     20-way, 1-shot omniglot:
         python main.py --datasource=omniglot --metatrain_iterations=60000 --meta_batch_size=16 --update_batch_size=1 --num_classes=20 --update_lr=0.1 --num_updates=5 --logdir=logs/omniglot20way/
-
     5-way 1-shot mini imagenet:
         python main.py --datasource=miniimagenet --metatrain_iterations=60000 --meta_batch_size=4 --update_batch_size=1 --update_lr=0.01 --num_updates=5 --num_classes=5 --logdir=logs/miniimagenet1shot/ --num_filters=32 --max_pool=True
-
     5-way 5-shot mini imagenet:
         python main.py --datasource=miniimagenet --metatrain_iterations=60000 --meta_batch_size=4 --update_batch_size=5 --update_lr=0.01 --num_updates=5 --num_classes=5 --logdir=logs/miniimagenet5shot/ --num_filters=32 --max_pool=True
-
     To run evaluation, use the '--train=False' flag and the '--test_set=True' flag to use the test set.
-
     For omniglot and miniimagenet training, acquire the dataset online, put it in the correspoding data directory, and see the python script instructions in that directory to preprocess the data.
-
     Note that better sinusoid results can be achieved by using a larger network.
 """
 import csv
@@ -311,7 +303,10 @@ def analyze(model, saver, sess, exp_string, data_generator, test_num_updates=Non
     ### prepare for visualizing
     from rsa import plot_rsa_fancy, rsa
     layers = [hid1, hid2, hid3, hid4, out]
-    layer_names = ["Pooling layer 1", "Pooling layer 2", "Pooling layer 3", "Pooling layer 4", "Logits/Head"]
+    if FLAGS.datasource == 'miniimagenet':
+        layer_names = ["Pooling layer 1", "Pooling layer 2", "Pooling layer 3", "Pooling layer 4", "Logits/Head"]
+    else:
+        layer_names = ["Convolution layer 1", "Convolution layer 2", "Convolution layer 3", "Convolution layer 4", "Logits/Head"]
 
     final_base_representation = []
     final_mean_diff_to_base = []
