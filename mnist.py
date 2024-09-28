@@ -7,6 +7,8 @@ from cka import *
 
 import matplotlib.pyplot as plt
 
+from utils import apply_representation_similarity
+
 # heiner activation maximization filters early layers
 
 # based on https://github.com/zonghua94/mnist/blob/master/mnist_cnn.py
@@ -76,7 +78,7 @@ if convolution:
     tvars = tf.trainable_variables()
 
     layer_names = ["Pooling layer 1", "Pooling layer 2", "Pooling layer 3", "Pooling layer 4", "Logits/Head"]
-
+    layer_names = ["pool 1", "pool 2", "pool 3", "pool 4", "logits"]
 else:
 
     weights = {}
@@ -116,7 +118,7 @@ test_images = mnist.test.images[:N]
 test_labels = mnist.test.labels[:N]
 
 
-for sim_measure in ["cka", "euclidean"]:
+for sim_measure in ["cka_kernel", "cka_linear", "rsa_euclidean", "rsa_cosine", "rsa_correlation"]:
 
     # init session
     sess = tf.Session()
@@ -147,16 +149,22 @@ for sim_measure in ["cka", "euclidean"]:
             colors = colors + list(range(5))
             peter = representations[0].reshape((N,-1))
             all_representations = all_representations + [r.reshape((N,-1)) for r in representations]
-            if sim_measure == "cka":
-                similarities_of_step = [kernel_CKA(np.reshape(s, (N, -1)), np.reshape(r, (N, -1))) for s, r in zip(start, representations)]
-                similarities_of_step_prev = [kernel_CKA(np.reshape(s, (N, -1)), np.reshape(r, (N, -1))) for s, r in zip(prev, representations)]
 
-            else:
-                print(np.mean(start[0]), np.mean(representations[0]))
-                similarities_of_step = [rsa(np.array([np.reshape(s, (N, -1)), np.reshape(r, (N, -1))]), sim_measure) for
-                                        s, r in zip(start, representations)]
-                similarities_of_step_prev = [rsa(np.array([np.reshape(s, (N, -1)), np.reshape(r, (N, -1))]), sim_measure)
-                                             for s, r in zip(prev, representations)]
+            similarities_of_step = [apply_representation_similarity(np.array([np.reshape(s, (N, -1)), np.reshape(r, (N, -1))]), sim_measure) for
+                                    s, r in zip(start, representations)]
+            similarities_of_step_prev = [apply_representation_similarity(np.array([np.reshape(s, (N, -1)), np.reshape(r, (N, -1))]), sim_measure)
+                                         for s, r in zip(prev, representations)]
+
+            # if sim_measure == "cka":
+            #     similarities_of_step = [kernel_CKA(np.reshape(s, (N, -1)), np.reshape(r, (N, -1))) for s, r in zip(start, representations)]
+            #     similarities_of_step_prev = [kernel_CKA(np.reshape(s, (N, -1)), np.reshape(r, (N, -1))) for s, r in zip(prev, representations)]
+            #
+            # else:
+            #     print(np.mean(start[0]), np.mean(representations[0]))
+            #     similarities_of_step = [rsa(np.array([np.reshape(s, (N, -1)), np.reshape(r, (N, -1))]), sim_measure) for
+            #                             s, r in zip(start, representations)]
+            #     similarities_of_step_prev = [rsa(np.array([np.reshape(s, (N, -1)), np.reshape(r, (N, -1))]), sim_measure)
+            #                                  for s, r in zip(prev, representations)]
 
             similarities.append(similarities_of_step)
             similarities_prev.append(similarities_of_step_prev)
@@ -165,20 +173,13 @@ for sim_measure in ["cka", "euclidean"]:
 
             print(i, compute_accuracy(mnist.test.images, mnist.test.labels))
 
-    plot_rsa(all_representations, labels, colors)
+    #plot_rsa(all_representations, labels, colors)
 
     similarities = np.array(similarities).transpose()
     similarities_prev = np.array(similarities_prev).transpose()
 
-
-    fig = plt.figure(figsize=(8, 2.5))
-    if sim_measure == "cka":
-        plt.title(f"CKA similarity before and after training")
-        plt.ylabel("Similarity")
-    else:
-        plt.title(f"RSA ({sim_measure}) dissimilarity before and after training")
-        plt.ylabel("Dissimilarity")
-
+    fig = plt.figure(figsize=(4, 2.5))
+    methods = sim_measure.split("_")
     plt.xlabel("Number of training steps")
 
     #plt.yscale('symlog', linthreshy=0.015)
@@ -186,5 +187,18 @@ for sim_measure in ["cka", "euclidean"]:
     for i in range(len(similarities)):
         plt.plot(steps, similarities[i], label=layer_names[i])
         #plt.plot(range(len(similarities_prev[i])), similarities_prev[i], label=layer_names[i]+" to prev")
-    plt.legend(bbox_to_anchor=(1.04, 0.5), loc="center left", borderaxespad=0)
-    plt.show()
+
+    if methods[0] == "cka":
+        plt.title(f"CKA ({methods[1]}) similarity")
+        plt.ylabel("Similarity")
+        plt.legend(loc="lower left")
+    elif methods[0] == "rsa":
+        plt.title(f"RSA ({methods[1]}) dissimilarity")
+        plt.ylabel("Dissimilarity")
+        plt.legend(loc="upper left")
+
+
+    #plt.show()
+    plt.savefig(f"img/mnist_{sim_measure}.pdf")
+
+

@@ -217,6 +217,7 @@ class MAML:
         fc_initializer =  tf.contrib.layers.xavier_initializer(dtype=dtype)
         k = 3
 
+        tf.random.set_random_seed(1)
         weights['conv1'] = tf.get_variable('conv1', [k, k, self.channels, self.dim_hidden], initializer=conv_initializer, dtype=dtype)
         weights['b1'] = tf.Variable(tf.zeros([self.dim_hidden]))
         weights['conv2'] = tf.get_variable('conv2', [k, k, self.dim_hidden, self.dim_hidden], initializer=conv_initializer, dtype=dtype)
